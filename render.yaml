@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: video-stream-bot
+    name: telegram-video-bot
     env: docker
     plan: free
     dockerfilePath: ./Dockerfile
@@ -12,7 +12,7 @@ services:
         sync: false
       - key: SERVER_URL
         fromService:
-          name: video-stream-bot
+          name: telegram-video-bot
           type: web
           property: url
       - key: MONGO_URI
