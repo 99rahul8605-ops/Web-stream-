@@ -1,15 +1,17 @@
 import os
 import uuid
+import json
 import threading
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, render_template, Response, request, jsonify
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
 import requests
-from pymongo import MongoClient, DESCENDING
-from pymongo.errors import ConnectionFailure
 from dotenv import load_dotenv
+import pickle
+from collections import OrderedDict
+import time
 
 # Load environment variables
 load_dotenv()
@@ -30,85 +32,143 @@ class Config:
     BOT_TOKEN = os.getenv("BOT_TOKEN", "")
     ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
     SERVER_URL = os.getenv("SERVER_URL", "http://localhost:5000")
-    MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-    DATABASE_NAME = "video_stream_bot"
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
-# Database setup
-class Database:
+# Simple in-memory database with file backup
+class SimpleDB:
     def __init__(self):
-        try:
-            self.client = MongoClient(Config.MONGO_URI, serverSelectionTimeoutMS=5000)
-            self.db = self.client[Config.DATABASE_NAME]
-            self.videos = self.db.videos
-            self.setup_indexes()
-            logger.info("✅ MongoDB connected successfully")
-        except Exception as e:
-            logger.error(f"❌ MongoDB connection failed: {e}")
-            # Fallback to in-memory storage
-            self.videos = []
+        self.videos = OrderedDict()  # video_id -> video_data
+        self.stats = {
+            "total_videos": 0,
+            "total_views": 0,
+            "start_time": datetime.now().isoformat()
+        }
+        self.load_from_file()
     
-    def setup_indexes(self):
-        """Create database indexes"""
+    def load_from_file(self):
+        """Load data from file if exists"""
         try:
-            # TTL index for auto-delete after 7 days
-            self.videos.create_index("created_at", expireAfterSeconds=7 * 24 * 3600)
-            self.videos.create_index("video_id", unique=True)
-            logger.info("✅ Database indexes created")
+            if os.path.exists('data.pkl'):
+                with open('data.pkl', 'rb') as f:
+                    data = pickle.load(f)
+                    self.videos = data.get('videos', OrderedDict())
+                    self.stats = data.get('stats', self.stats)
+                logger.info("✅ Loaded data from file")
         except Exception as e:
-            logger.error(f"❌ Error creating indexes: {e}")
+            logger.error(f"❌ Error loading data: {e}")
+    
+    def save_to_file(self):
+        """Save data to file"""
+        try:
+            data = {
+                'videos': self.videos,
+                'stats': self.stats
+            }
+            with open('data.pkl', 'wb') as f:
+                pickle.dump(data, f)
+        except Exception as e:
+            logger.error(f"❌ Error saving data: {e}")
     
     def add_video(self, video_data):
-        """Add video to database"""
-        try:
-            video_data['created_at'] = datetime.utcnow()
-            video_data['views'] = 0
-            result = self.videos.insert_one(video_data)
-            logger.info(f"✅ Video added: {video_data['video_id']}")
-            return str(result.inserted_id)
-        except Exception as e:
-            logger.error(f"❌ Error adding video: {e}")
-            return None
+        """Add a video"""
+        video_id = video_data.get('video_id')
+        if video_id:
+            self.videos[video_id] = video_data
+            self.stats["total_videos"] += 1
+            self.save_to_file()
+            logger.info(f"✅ Video added: {video_id}")
+            return True
+        return False
     
     def get_video(self, video_id):
         """Get video by ID"""
-        try:
-            return self.videos.find_one({"video_id": video_id})
-        except Exception as e:
-            logger.error(f"❌ Error getting video: {e}")
-            return None
+        return self.videos.get(video_id)
     
     def increment_views(self, video_id):
         """Increment view count"""
-        try:
-            self.videos.update_one(
-                {"video_id": video_id},
-                {"$inc": {"views": 1}}
-            )
-            logger.debug(f"✅ Views incremented for {video_id}")
-        except Exception as e:
-            logger.error(f"❌ Error incrementing views: {e}")
+        if video_id in self.videos:
+            video = self.videos[video_id]
+            video['views'] = video.get('views', 0) + 1
+            self.stats["total_views"] += 1
+            self.save_to_file()
+            return True
+        return False
+    
+    def get_user_videos(self, user_id, limit=10):
+        """Get videos by user"""
+        user_videos = []
+        for video in reversed(list(self.videos.values())):
+            if video.get('user_id') == user_id:
+                user_videos.append(video)
+                if len(user_videos) >= limit:
+                    break
+        return user_videos
+    
+    def delete_video(self, video_id, user_id=None):
+        """Delete a video"""
+        if video_id in self.videos:
+            if user_id is None or self.videos[video_id].get('user_id') == user_id:
+                del self.videos[video_id]
+                self.stats["total_videos"] -= 1
+                self.save_to_file()
+                return True
+        return False
+    
+    def cleanup_old_videos(self, max_age_hours=24):
+        """Cleanup old videos (older than max_age_hours)"""
+        now = datetime.now()
+        deleted = 0
+        video_ids_to_delete = []
+        
+        for video_id, video in self.videos.items():
+            created_str = video.get('created_at')
+            if created_str:
+                try:
+                    created = datetime.fromisoformat(created_str)
+                    age = now - created
+                    if age.total_seconds() > max_age_hours * 3600:
+                        video_ids_to_delete.append(video_id)
+                except:
+                    pass
+        
+        for video_id in video_ids_to_delete:
+            del self.videos[video_id]
+            deleted += 1
+        
+        if deleted:
+            self.stats["total_videos"] -= deleted
+            self.save_to_file()
+        
+        return deleted
     
     def get_stats(self):
         """Get database statistics"""
-        try:
-            total_videos = self.videos.count_documents({})
-            
-            pipeline = [{"$group": {"_id": None, "total_views": {"$sum": "$views"}}}]
-            result = list(self.videos.aggregate(pipeline))
-            total_views = result[0]["total_views"] if result else 0
-            
-            return {
-                "total_videos": total_videos,
-                "total_views": total_views,
-                "status": "connected"
-            }
-        except Exception as e:
-            logger.error(f"❌ Error getting stats: {e}")
-            return {"total_videos": 0, "total_views": 0, "status": "disconnected"}
+        return {
+            "total_videos": len(self.videos),
+            "total_views": self.stats.get("total_views", 0),
+            "status": "connected",
+            "uptime": self.stats.get("start_time")
+        }
 
 # Initialize database
-db = Database()
+db = SimpleDB()
+
+# Background cleanup task
+def cleanup_task():
+    """Background task to cleanup old videos"""
+    while True:
+        try:
+            deleted = db.cleanup_old_videos(max_age_hours=168)  # 7 days
+            if deleted:
+                logger.info(f"🧹 Cleaned up {deleted} old videos")
+            time.sleep(3600)  # Run every hour
+        except Exception as e:
+            logger.error(f"Error in cleanup task: {e}")
+            time.sleep(300)
+
+# Start cleanup thread
+cleanup_thread = threading.Thread(target=cleanup_task, daemon=True)
+cleanup_thread.start()
 
 # Flask Routes
 @app.route('/')
@@ -131,11 +191,25 @@ def stream_video(video_id):
     
     db.increment_views(video_id)
     
+    # Format date
+    created = video.get('created_at', '')
+    if created:
+        try:
+            created_dt = datetime.fromisoformat(created)
+            created = created_dt.strftime('%B %d, %Y %H:%M')
+        except:
+            created = 'Unknown'
+    
+    size_mb = video.get('file_size', 0) / (1024 * 1024)
+    
     return render_template(
         'video_player.html',
         video_id=video_id,
         video_name=video.get('file_name', 'Video'),
-        views=video.get('views', 0) + 1
+        video_size=size_mb,
+        views=video.get('views', 0) + 1,
+        created=created,
+        username=video.get('username', 'Anonymous')
     )
 
 @app.route('/video/<video_id>')
@@ -181,10 +255,13 @@ def health():
     stats = db.get_stats()
     return jsonify({
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now().isoformat(),
         "server": Config.SERVER_URL,
-        "database": stats['status'],
-        "bot": "running" if Config.BOT_TOKEN else "disabled"
+        "database": "simple_memory_db",
+        "bot": "running" if Config.BOT_TOKEN else "disabled",
+        "videos": stats['total_videos'],
+        "views": stats['total_views'],
+        "uptime": stats['uptime']
     })
 
 @app.route('/api/video/<video_id>')
@@ -199,7 +276,7 @@ def video_info(video_id):
         "file_name": video.get('file_name'),
         "file_size": video.get('file_size'),
         "views": video.get('views', 0),
-        "created_at": video.get('created_at').isoformat() if video.get('created_at') else None,
+        "created_at": video.get('created_at'),
         "stream_url": f"{Config.SERVER_URL}/stream/{video_id}"
     })
 
@@ -209,9 +286,15 @@ async def start_command(update: Update, context: CallbackContext):
     await update.message.reply_text(
         "🎬 *Welcome to Video Stream Bot!*\n\n"
         "Send me any video file (up to 50MB) and I'll give you a streaming link.\n\n"
+        "*Features:*\n"
+        "• Upload videos up to 50MB\n"
+        "• Get streaming links instantly\n"
+        "• Videos auto-delete after 7 days\n"
+        "• Mobile-friendly player\n\n"
         "*Commands:*\n"
         "/start - Show this message\n"
         "/help - Get help\n"
+        "/myvideos - List your videos\n"
         "/status - Check bot status",
         parse_mode='Markdown'
     )
@@ -219,27 +302,58 @@ async def start_command(update: Update, context: CallbackContext):
 async def help_command(update: Update, context: CallbackContext):
     """Handle /help command"""
     await update.message.reply_text(
-        "📖 *Help*\n\n"
+        "📖 *Help Guide*\n\n"
         "1. Send me any video file (MP4, AVI, MOV, MKV, WebM)\n"
         "2. Maximum file size: 50MB\n"
         "3. I'll send you a streaming link\n"
         "4. Share the link with anyone\n"
         "5. Videos auto-delete after 7 days\n\n"
-        "Need help? Contact admin.",
+        "*Note:* Videos are stored temporarily in memory and will be lost on server restart.",
         parse_mode='Markdown'
     )
 
+async def myvideos_command(update: Update, context: CallbackContext):
+    """Handle /myvideos command"""
+    user = update.effective_user
+    try:
+        videos = db.get_user_videos(user.id)
+        
+        if not videos:
+            await update.message.reply_text("📭 You haven't uploaded any videos yet.")
+            return
+        
+        response = "📁 *Your Recent Videos:*\n\n"
+        for idx, video in enumerate(videos[:5], 1):
+            stream_url = f"{Config.SERVER_URL}/stream/{video['video_id']}"
+            size_mb = video.get('file_size', 0) / (1024 * 1024)
+            
+            response += f"{idx}. *{video.get('file_name', 'Video')}*\n"
+            response += f"   👁️ {video.get('views', 0)} views | 📦 {size_mb:.1f}MB\n"
+            response += f"   🔗 {stream_url}\n\n"
+        
+        response += f"📊 Total: {len(videos)} videos"
+        
+        await update.message.reply_text(response, parse_mode='Markdown', disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Error in myvideos command: {e}")
+        await update.message.reply_text("❌ Error fetching your videos.")
+
 async def status_command(update: Update, context: CallbackContext):
     """Handle /status command"""
-    stats = db.get_stats()
-    await update.message.reply_text(
-        f"📊 *Bot Status*\n\n"
-        f"✅ Server: {Config.SERVER_URL}\n"
-        f"📹 Total Videos: {stats['total_videos']}\n"
-        f"👁️ Total Views: {stats['total_views']}\n"
-        f"🛠️ Database: {stats['status']}\n",
-        parse_mode='Markdown'
-    )
+    try:
+        stats = db.get_stats()
+        await update.message.reply_text(
+            f"📊 *Bot Status*\n\n"
+            f"✅ Server: {Config.SERVER_URL}\n"
+            f"📹 Total Videos: {stats['total_videos']}\n"
+            f"👁️ Total Views: {stats['total_views']}\n"
+            f"🕐 Uptime: {stats.get('uptime', 'Unknown')}\n"
+            f"🛠️ Storage: Simple Memory DB",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error in status command: {e}")
+        await update.message.reply_text("❌ Error fetching status.")
 
 async def handle_video(update: Update, context: CallbackContext):
     """Handle video files"""
@@ -260,13 +374,15 @@ async def handle_video(update: Update, context: CallbackContext):
         
         # Check file size
         if video_file.file_size > Config.MAX_FILE_SIZE:
-            await update.message.reply_text(f"❌ File too large! Max size: {Config.MAX_FILE_SIZE // (1024*1024)}MB")
+            await update.message.reply_text(
+                f"❌ File too large! Maximum size is {Config.MAX_FILE_SIZE // (1024*1024)}MB"
+            )
             return
         
         # Generate video ID
         video_id = str(uuid.uuid4())[:8]
         
-        # Save to database
+        # Prepare video data
         video_data = {
             "video_id": video_id,
             "file_id": video_file.file_id,
@@ -274,12 +390,15 @@ async def handle_video(update: Update, context: CallbackContext):
             "file_size": video_file.file_size,
             "mime_type": mime_type,
             "user_id": user.id,
-            "username": user.username or str(user.id)
+            "username": user.username or str(user.id),
+            "views": 0,
+            "created_at": datetime.now().isoformat()
         }
         
-        db_id = db.add_video(video_data)
+        # Save to database
+        success = db.add_video(video_data)
         
-        if not db_id:
+        if not success:
             await update.message.reply_text("❌ Failed to save video. Please try again.")
             return
         
@@ -331,11 +450,7 @@ async def button_callback(update: Update, context: CallbackContext):
 
 async def error_handler(update: Update, context: CallbackContext):
     """Handle errors"""
-    logger.error(f"Update {update} caused error {context.error}")
-    try:
-        await update.message.reply_text("❌ An error occurred. Please try again.")
-    except:
-        pass
+    logger.error(f"Telegram Bot Error: {context.error}")
 
 # Telegram bot thread function
 def run_bot():
@@ -351,6 +466,7 @@ def run_bot():
         # Add handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("myvideos", myvideos_command))
         application.add_handler(CommandHandler("status", status_command))
         application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
         application.add_handler(CallbackQueryHandler(button_callback))
@@ -362,16 +478,10 @@ def run_bot():
     except Exception as e:
         logger.error(f"❌ Failed to start bot: {e}")
 
-# Start bot thread when Flask app starts
-def start_bot_thread():
-    """Start the Telegram bot in a separate thread"""
-    if Config.BOT_TOKEN:
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
-        logger.info("✅ Bot thread started")
-
-# Start bot thread when app is imported (for gunicorn)
-start_bot_thread()
+# Start bot thread
+bot_thread = threading.Thread(target=run_bot, daemon=True)
+bot_thread.start()
+logger.info("✅ Bot thread started")
 
 # For local development
 if __name__ == '__main__':
