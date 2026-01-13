@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: video-stream-web
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers=1 --threads=2 --timeout=120
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: SERVER_URL
+        fromService:
+          type: web
+          name: video-stream-web
+          property: url
+      - key: MONGO_URI
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+  
+  - type: worker
+    name: video-stream-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        fromService:
+          type: web
+          name: video-stream-web
+          envVarKey: BOT_TOKEN
+      - key: ADMIN_ID
+        fromService:
+          type: web
+          name: video-stream-web
+          envVarKey: ADMIN_ID
+      - key: SERVER_URL
+        fromService:
+          type: web
+          name: video-stream-web
+          property: url
+      - key: MONGO_URI
+        fromService:
+          type: web
+          name: video-stream-web
+          envVarKey: MONGO_URI
