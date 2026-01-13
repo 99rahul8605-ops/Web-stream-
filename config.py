@@ -13,12 +13,16 @@ class Config:
     # Server configuration
     SERVER_URL = os.getenv("SERVER_URL", "https://your-app-name.onrender.com")
     
-    # Database
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///videos.db")
+    # MongoDB configuration
+    MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+    DATABASE_NAME = "video_stream_bot"
     
     # Video settings
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB limit for free tier
     ALLOWED_EXTENSIONS = ['.mp4', '.avi', '.mov', '.mkv', '.webm']
     
-    # Cleanup old files (days)
+    # Cleanup settings (days)
     CLEANUP_DAYS = 7
+    
+    # Security
+    SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this")
