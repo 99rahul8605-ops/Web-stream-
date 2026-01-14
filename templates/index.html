@@ -1,18 +1,14 @@
+mkdir -p templates && cat > templates/index.html << 'EOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Telegram Video Stream</title>
+    <title>Video Stream Bot</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
             display: flex;
@@ -20,7 +16,6 @@
             align-items: center;
             padding: 20px;
         }
-        
         .container {
             background: white;
             border-radius: 20px;
@@ -30,84 +25,66 @@
             max-width: 500px;
             width: 100%;
         }
-        
-        h1 {
-            color: #333;
-            margin-bottom: 20px;
-            font-size: 2rem;
+        h1 { color: #333; margin-bottom: 20px; }
+        p { color: #666; line-height: 1.6; margin-bottom: 20px; }
+        .stats {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin: 20px 0;
         }
-        
-        p {
-            color: #666;
-            line-height: 1.6;
-            margin-bottom: 30px;
+        .instructions {
+            text-align: left;
+            margin-top: 30px;
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
         }
-        
-        .btn {
+        .test-btn {
             background: #667eea;
             color: white;
-            text-decoration: none;
+            border: none;
             padding: 12px 30px;
             border-radius: 10px;
-            display: inline-block;
             font-weight: 600;
             margin: 10px;
-            transition: all 0.3s ease;
+            cursor: pointer;
+            font-size: 16px;
         }
-        
-        .btn:hover {
+        .test-btn:hover {
             background: #5a67d8;
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-        }
-        
-        .features {
-            margin-top: 30px;
-            text-align: left;
-        }
-        
-        .feature {
-            display: flex;
-            align-items: center;
-            margin-bottom: 15px;
-        }
-        
-        .feature span {
-            background: #667eea;
-            color: white;
-            width: 30px;
-            height: 30px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-right: 15px;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🎬 Video Stream Bot</h1>
-        <p>Convert Telegram videos to streamable web links. Send any video to our Telegram bot and get a shareable streaming link!</p>
+        <p>Convert Telegram videos to streamable web links instantly!</p>
         
-        <a href="https://t.me/your_bot_username" class="btn" target="_blank">
-            Open Telegram Bot
-        </a>
-        
-        <div class="features">
-            <div class="feature">
-                <span>📹</span> Upload videos up to 50MB
-            </div>
-            <div class="feature">
-                <span>🔗</span> Get private streaming links
-            </div>
-            <div class="feature">
-                <span>📱</span> Mobile-friendly player
-            </div>
-            <div class="feature">
-                <span>👁️</span> View count tracking
-            </div>
+        <div class="stats">
+            <p>📹 Videos Processed: <strong>{{ total_videos }}</strong></p>
+            <p>👁️ Total Views: <strong>{{ total_views }}</strong></p>
         </div>
+        
+        <div class="instructions">
+            <h3>How to use:</h3>
+            <ol style="margin-left: 20px; margin-top: 10px;">
+                <li>Open Telegram and find @web_stream_1_bot</li>
+                <li>Send any video file (up to 50MB)</li>
+                <li>Receive a streaming link instantly</li>
+                <li>Click the link to watch online</li>
+                <li>Share with anyone - no login needed!</li>
+            </ol>
+        </div>
+        
+        <button onclick="window.open('https://t.me/web_stream_1_bot', '_blank')" class="test-btn">
+            🤖 Open Telegram Bot
+        </button>
+        
+        <p style="margin-top: 20px; color: #999; font-size: 0.9rem;">
+            Server: {{ server_url }}
+        </p>
     </div>
 </body>
 </html>
+EOF
