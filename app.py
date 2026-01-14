@@ -1,5 +1,6 @@
 import os
 import uuid
+import asyncio
 import threading
 import logging
 from datetime import datetime
@@ -112,7 +113,7 @@ def health():
     })
 
 # Telegram Bot Functions
-async def start_command(update, context):
+async def start_command(update: Update, context: CallbackContext):
     """Handle /start command"""
     await update.message.reply_text(
         "🎬 *Welcome to Video Stream Bot!*\n\n"
@@ -124,7 +125,7 @@ async def start_command(update, context):
         parse_mode='Markdown'
     )
 
-async def help_command(update, context):
+async def help_command(update: Update, context: CallbackContext):
     """Handle /help command"""
     await update.message.reply_text(
         "📖 *Help*\n\n"
@@ -137,7 +138,7 @@ async def help_command(update, context):
         parse_mode='Markdown'
     )
 
-async def status_command(update, context):
+async def status_command(update: Update, context: CallbackContext):
     """Handle /status command"""
     await update.message.reply_text(
         f"📊 *Bot Status*\n\n"
@@ -147,7 +148,7 @@ async def status_command(update, context):
         parse_mode='Markdown'
     )
 
-async def handle_video(update, context):
+async def handle_video(update: Update, context: CallbackContext):
     """Handle video files"""
     try:
         # Get video file
@@ -212,33 +213,46 @@ async def handle_video(update, context):
         logger.error(f"Error handling video: {e}")
         await update.message.reply_text("❌ Error processing video.")
 
-async def error_handler(update, context):
+async def error_handler(update: Update, context: CallbackContext):
     """Handle errors"""
     logger.error(f"Bot error: {context.error}")
 
-# Telegram bot thread
+# Telegram bot thread with proper asyncio setup
 def run_bot():
+    """Run the Telegram bot with proper asyncio event loop"""
     if not Config.BOT_TOKEN:
         logger.warning("BOT_TOKEN not set. Bot disabled.")
         return
     
     try:
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Create application
         application = Application.builder().token(Config.BOT_TOKEN).build()
+        
+        # Add handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("status", status_command))
         application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
         application.add_error_handler(error_handler)
         
+        # Run the bot
         logger.info("Starting Telegram bot...")
         application.run_polling()
+        
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
 
 # Start bot thread
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
+logger.info("✅ Bot thread started successfully")
 
+# For local development
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    logger.info(f"🚀 Starting Flask app on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
