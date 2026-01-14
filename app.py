@@ -1,9 +1,12 @@
 import os
 import uuid
+import asyncio
+import threading
 import logging
 from datetime import datetime, timedelta
 from flask import Flask, render_template, Response, jsonify, request
-from telegram import Bot
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
 import requests
 from dotenv import load_dotenv
 import time
@@ -21,107 +24,39 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "your-secret-key-here")
+app.secret_key = os.getenv("SECRET_KEY", "your-secret-key-change-this")
 
 # Configuration
-class Config:
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-    ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-    SERVER_URL = os.getenv("SERVER_URL", "https://web-stream-1.onrender.com")
-    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+SERVER_URL = os.getenv("SERVER_URL", "https://web-stream-1.onrender.com")
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
-# Simple in-memory storage with automatic cleanup
-class VideoStorage:
-    def __init__(self):
-        self.videos = OrderedDict()
-        self.stats = {
-            "total_videos": 0,
-            "total_views": 0,
-            "start_time": datetime.now().isoformat()
-        }
-    
-    def add_video(self, video_data):
-        """Add a video to storage"""
-        video_id = video_data.get('video_id')
-        if video_id:
-            self.videos[video_id] = video_data
-            self.stats["total_videos"] += 1
-            logger.info(f"✅ Video added: {video_id}")
-            return True
-        return False
-    
-    def get_video(self, video_id):
-        """Get video by ID"""
-        # Clean old videos first
-        self.cleanup_old_videos()
-        return self.videos.get(video_id)
-    
-    def increment_views(self, video_id):
-        """Increment view count"""
-        video = self.videos.get(video_id)
-        if video:
-            video['views'] = video.get('views', 0) + 1
-            self.stats["total_views"] += 1
-            return True
-        return False
-    
-    def cleanup_old_videos(self, max_age_hours=168):  # 7 days
-        """Remove videos older than max_age_hours"""
-        now = datetime.now()
-        videos_to_delete = []
-        
-        for video_id, video in self.videos.items():
-            created_str = video.get('created_at')
-            if created_str:
-                try:
-                    created = datetime.fromisoformat(created_str)
-                    age_hours = (now - created).total_seconds() / 3600
-                    if age_hours > max_age_hours:
-                        videos_to_delete.append(video_id)
-                except:
-                    pass
-        
-        for video_id in videos_to_delete:
-            del self.videos[video_id]
-        
-        if videos_to_delete:
-            self.stats["total_videos"] -= len(videos_to_delete)
-            logger.info(f"🧹 Cleaned up {len(videos_to_delete)} old videos")
-        
-        return len(videos_to_delete)
-    
-    def get_stats(self):
-        """Get storage statistics"""
-        self.cleanup_old_videos()  # Clean up before returning stats
-        return {
-            "total_videos": len(self.videos),
-            "total_views": self.stats["total_views"],
-            "status": "active"
-        }
-
-# Initialize storage
-storage = VideoStorage()
+# Simple in-memory storage
+videos_db = {}
+stats = {"total_videos": 0, "total_views": 0, "start_time": datetime.now().isoformat()}
 
 # Flask Routes
 @app.route('/')
 def index():
     """Home page"""
-    stats = storage.get_stats()
     return render_template('index.html',
-                         server_url=Config.SERVER_URL,
-                         total_videos=stats['total_videos'],
-                         total_views=stats['total_views'])
+                         server_url=SERVER_URL,
+                         total_videos=stats["total_videos"],
+                         total_views=stats["total_views"])
 
 @app.route('/stream/<video_id>')
 def stream_video(video_id):
     """Video player page"""
-    video = storage.get_video(video_id)
+    video = videos_db.get(video_id)
     if not video:
         return render_template('error.html', 
                              message="Video not found or expired",
-                             server_url=Config.SERVER_URL), 404
+                             server_url=SERVER_URL), 404
     
-    storage.increment_views(video_id)
+    # Increment view count
+    video['views'] = video.get('views', 0) + 1
+    stats["total_views"] += 1
     
     # Format date
     created = video.get('created_at', '')
@@ -147,92 +82,49 @@ def stream_video(video_id):
 @app.route('/video/<video_id>')
 def serve_video(video_id):
     """Serve video stream"""
-    video = storage.get_video(video_id)
+    video = videos_db.get(video_id)
     if not video:
         return "Video not found", 404
     
     try:
         # Get bot instance
-        bot = Bot(token=Config.BOT_TOKEN)
+        bot = Bot(token=BOT_TOKEN)
         file = bot.get_file(video['file_id'])
         
         # Get file URL
         file_url = file.file_path
         if not file_url.startswith('http'):
-            file_url = f"https://api.telegram.org/file/bot{Config.BOT_TOKEN}/{file_url}"
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_url}"
         
-        # Check if client supports range requests
-        range_header = request.headers.get('Range')
+        # Stream video
+        def generate():
+            response = requests.get(file_url, stream=True)
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
         
-        if range_header:
-            # Handle range request for seeking
-            headers = {'Range': range_header}
-            response = requests.get(file_url, headers=headers, stream=True)
-            
-            def generate():
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        yield chunk
-            
-            return Response(
-                generate(),
-                status=206,
-                content_type=video.get('mime_type', 'video/mp4'),
-                headers={
-                    'Content-Range': response.headers.get('Content-Range'),
-                    'Accept-Ranges': 'bytes',
-                    'Content-Length': response.headers.get('Content-Length'),
-                    'Content-Disposition': f'inline; filename="{video.get("file_name", "video.mp4")}"'
-                }
-            )
-        else:
-            # Full video stream
-            def generate():
-                response = requests.get(file_url, stream=True)
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        yield chunk
-            
-            return Response(
-                generate(),
-                content_type=video.get('mime_type', 'video/mp4'),
-                headers={
-                    'Content-Disposition': f'inline; filename="{video.get("file_name", "video.mp4")}"'
-                }
-            )
+        return Response(
+            generate(),
+            content_type=video.get('mime_type', 'video/mp4'),
+            headers={
+                'Content-Disposition': f'inline; filename="{video.get("file_name", "video.mp4")}"'
+            }
+        )
     
     except Exception as e:
-        logger.error(f"❌ Error serving video: {e}")
+        logger.error(f"Error serving video: {e}")
         return "Error serving video", 500
 
 @app.route('/health')
 def health():
     """Health check endpoint"""
-    stats = storage.get_stats()
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "server": Config.SERVER_URL,
-        "storage": "memory",
-        "videos": stats['total_videos'],
-        "views": stats['total_views'],
-        "bot": "enabled" if Config.BOT_TOKEN else "disabled"
-    })
-
-@app.route('/api/video/<video_id>')
-def video_info(video_id):
-    """Get video info"""
-    video = storage.get_video(video_id)
-    if not video:
-        return jsonify({"error": "Video not found"}), 404
-    
-    return jsonify({
-        "video_id": video.get('video_id'),
-        "file_name": video.get('file_name'),
-        "file_size": video.get('file_size'),
-        "views": video.get('views', 0),
-        "created_at": video.get('created_at'),
-        "stream_url": f"{Config.SERVER_URL}/stream/{video_id}"
+        "server": SERVER_URL,
+        "bot": "running" if BOT_TOKEN else "disabled",
+        "videos": stats["total_videos"],
+        "views": stats["total_views"]
     })
 
 @app.route('/api/save_video', methods=['POST'])
@@ -247,82 +139,234 @@ def save_video():
         if not video_id:
             return jsonify({"error": "video_id is required"}), 400
         
-        # Ensure required fields
-        required_fields = ['file_id', 'file_name', 'file_size', 'user_id']
-        for field in required_fields:
-            if field not in data:
-                return jsonify({"error": f"{field} is required"}), 400
+        # Save to database
+        videos_db[video_id] = data
+        stats["total_videos"] += 1
         
-        # Add timestamp if not present
-        if 'created_at' not in data:
-            data['created_at'] = datetime.now().isoformat()
+        logger.info(f"Video saved: {video_id}")
         
-        # Add default values
-        data.setdefault('views', 0)
-        data.setdefault('mime_type', 'video/mp4')
-        
-        # Save video
-        success = storage.add_video(data)
-        
-        if success:
-            return jsonify({
-                "status": "success",
-                "video_id": video_id,
-                "stream_url": f"{Config.SERVER_URL}/stream/{video_id}"
-            })
-        else:
-            return jsonify({"error": "Failed to save video"}), 500
+        return jsonify({
+            "status": "success",
+            "video_id": video_id,
+            "stream_url": f"{SERVER_URL}/stream/{video_id}"
+        })
             
     except Exception as e:
-        logger.error(f"❌ Error saving video: {e}")
+        logger.error(f"Error saving video: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/stats')
-def stats_page():
-    """Statistics page"""
-    stats = storage.get_stats()
-    return jsonify({
-        "server": Config.SERVER_URL,
-        "total_videos": stats['total_videos'],
-        "total_views": stats['total_views'],
-        "uptime": storage.stats.get('start_time', 'Unknown'),
-        "status": "running"
-    })
+# Telegram Bot Functions
+async def start_command(update: Update, context: CallbackContext):
+    """Handle /start command"""
+    await update.message.reply_text(
+        "🎬 *Welcome to Video Stream Bot!*\n\n"
+        "Send me any video file (up to 50MB) and I'll give you a streaming link!\n\n"
+        "*Commands:*\n"
+        "/start - Show this message\n"
+        "/help - Get help\n"
+        "/status - Check bot status",
+        parse_mode='Markdown'
+    )
 
-@app.errorhandler(404)
-def not_found(e):
-    return render_template('error.html', 
-                         message="Page not found",
-                         server_url=Config.SERVER_URL), 404
+async def help_command(update: Update, context: CallbackContext):
+    """Handle /help command"""
+    await update.message.reply_text(
+        "📖 *Help Guide*\n\n"
+        "1. Send me any video file (MP4, AVI, MOV, MKV, WebM)\n"
+        "2. Maximum size: 50MB\n"
+        "3. I'll send you a streaming link\n"
+        "4. Share the link with anyone\n"
+        "5. Videos auto-delete after 7 days\n\n"
+        "Need help? Try again or contact support.",
+        parse_mode='Markdown'
+    )
 
-@app.errorhandler(500)
-def server_error(e):
-    return render_template('error.html',
-                         message="Internal server error",
-                         server_url=Config.SERVER_URL), 500
+async def status_command(update: Update, context: CallbackContext):
+    """Handle /status command"""
+    await update.message.reply_text(
+        f"📊 *Bot Status*\n\n"
+        f"✅ Server: {SERVER_URL}\n"
+        f"📹 Videos: {stats['total_videos']}\n"
+        f"👁️ Views: {stats['total_views']}\n"
+        f"🤖 Status: Running",
+        parse_mode='Markdown'
+    )
 
-# Background cleanup thread
-def cleanup_thread():
-    """Background thread to cleanup old videos"""
+async def handle_video(update: Update, context: CallbackContext):
+    """Handle video files"""
+    user = update.effective_user
+    
+    try:
+        # Get video file
+        if update.message.video:
+            video_file = update.message.video
+            file_name = video_file.file_name or f"video_{video_file.file_id}.mp4"
+            mime_type = "video/mp4"
+        elif update.message.document and update.message.document.mime_type.startswith('video/'):
+            video_file = update.message.document
+            file_name = video_file.file_name or f"video_{video_file.file_id}"
+            mime_type = video_file.mime_type
+        else:
+            return
+        
+        # Check file size
+        if video_file.file_size > MAX_FILE_SIZE:
+            await update.message.reply_text(
+                f"❌ File too large! Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB"
+            )
+            return
+        
+        # Generate video ID
+        video_id = str(uuid.uuid4())[:8]
+        
+        # Prepare video data
+        video_data = {
+            "video_id": video_id,
+            "file_id": video_file.file_id,
+            "file_name": file_name,
+            "file_size": video_file.file_size,
+            "mime_type": mime_type,
+            "user_id": user.id,
+            "username": user.username or user.first_name or str(user.id),
+            "views": 0,
+            "created_at": datetime.now().isoformat()
+        }
+        
+        # Save to database (in-memory)
+        videos_db[video_id] = video_data
+        stats["total_videos"] += 1
+        
+        # Create streaming URL
+        stream_url = f"{SERVER_URL}/stream/{video_id}"
+        
+        # Create buttons
+        keyboard = [
+            [InlineKeyboardButton("🎬 Stream Video", url=stream_url)],
+            [InlineKeyboardButton("📋 Copy Link", callback_data=f"copy_{video_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        size_mb = video_file.file_size / (1024 * 1024)
+        
+        response_text = f"""
+✅ *Video Uploaded Successfully!*
+
+📹 *File:* `{file_name}`
+📦 *Size:* `{size_mb:.1f} MB`
+🔗 *Stream Link:* `{stream_url}`
+
+*Click below to stream your video:*
+        """
+        
+        await update.message.reply_text(
+            response_text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown',
+            disable_web_page_preview=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Error handling video: {e}")
+        await update.message.reply_text("❌ Error processing video. Please try again.")
+
+async def button_callback(update: Update, context: CallbackContext):
+    """Handle button clicks"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data.startswith("copy_"):
+        video_id = query.data[5:]
+        stream_url = f"{SERVER_URL}/stream/{video_id}"
+        await query.edit_message_text(
+            f"📋 *Link Copied!*\n\nShare this link:\n`{stream_url}`",
+            parse_mode='Markdown'
+        )
+
+async def error_handler(update: Update, context: CallbackContext):
+    """Handle errors"""
+    logger.error(f"Bot error: {context.error}")
+
+# Cleanup old videos function
+def cleanup_old_videos():
+    """Remove videos older than 7 days"""
     while True:
         try:
-            deleted = storage.cleanup_old_videos()
-            if deleted:
-                logger.info(f"🧹 Cleaned up {deleted} old videos")
+            now = datetime.now()
+            videos_to_delete = []
+            
+            for video_id, video in list(videos_db.items()):
+                created_str = video.get('created_at')
+                if created_str:
+                    try:
+                        created = datetime.fromisoformat(created_str)
+                        age_days = (now - created).total_seconds() / (24 * 3600)
+                        if age_days > 7:  # 7 days
+                            videos_to_delete.append(video_id)
+                    except:
+                        pass
+            
+            for video_id in videos_to_delete:
+                del videos_db[video_id]
+            
+            if videos_to_delete:
+                stats["total_videos"] -= len(videos_to_delete)
+                logger.info(f"Cleaned up {len(videos_to_delete)} old videos")
+            
             time.sleep(3600)  # Run every hour
+            
         except Exception as e:
-            logger.error(f"Cleanup thread error: {e}")
+            logger.error(f"Cleanup error: {e}")
             time.sleep(300)
 
-# Start cleanup thread
-import threading
-cleanup_worker = threading.Thread(target=cleanup_thread, daemon=True)
-cleanup_worker.start()
+# Telegram bot runner with proper asyncio setup
+def run_bot():
+    """Run the Telegram bot"""
+    if not BOT_TOKEN:
+        logger.warning("BOT_TOKEN not set. Telegram bot disabled.")
+        return
+    
+    try:
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Create application
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("status", status_command))
+        application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+        application.add_handler(CallbackQueryHandler(button_callback))
+        application.add_error_handler(error_handler)
+        
+        # Run the bot
+        logger.info("🤖 Starting Telegram bot...")
+        application.run_polling()
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
 
-# Main entry point
+# Start bot and cleanup threads
+def start_background_threads():
+    """Start background threads for bot and cleanup"""
+    # Start cleanup thread
+    cleanup_thread = threading.Thread(target=cleanup_old_videos, daemon=True)
+    cleanup_thread.start()
+    logger.info("✅ Cleanup thread started")
+    
+    # Start bot thread
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    logger.info("✅ Bot thread started")
+
+# Start background threads when app starts
+start_background_threads()
+
+# For local development
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    logger.info(f"🚀 Starting Flask app on port {port}")
-    logger.info(f"🌐 Server URL: {Config.SERVER_URL}")
-    logger.info(f"🤖 Bot Token: {'Set' if Config.BOT_TOKEN else 'Not set'}")
+    logger.info(f"🚀 Starting app on port {port}")
+    logger.info(f"🌐 Server URL: {SERVER_URL}")
     app.run(host='0.0.0.0', port=port, debug=False)
