@@ -1,63 +1,38 @@
+cat > templates/video_player.html << 'EOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stream Video - {{ video_name }}</title>
+    <title>{{ video_name }} - Video Stream</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
             padding: 20px;
         }
-        
         .container {
             background: white;
             border-radius: 20px;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
             overflow: hidden;
-            width: 100%;
             max-width: 800px;
+            margin: 0 auto;
         }
-        
         .header {
-            background: #f8f9fa;
+            background: #667eea;
+            color: white;
             padding: 20px;
-            border-bottom: 1px solid #e9ecef;
         }
-        
-        .header h1 {
-            color: #333;
-            font-size: 1.5rem;
-            margin-bottom: 5px;
-            word-break: break-word;
-        }
-        
-        .stats {
-            color: #666;
-            font-size: 0.9rem;
-            display: flex;
-            gap: 15px;
-        }
-        
         .video-container {
             position: relative;
-            padding-bottom: 56.25%; /* 16:9 Aspect Ratio */
+            padding-bottom: 56.25%;
             height: 0;
             background: #000;
         }
-        
-        .video-container video {
+        video {
             position: absolute;
             top: 0;
             left: 0;
@@ -65,74 +40,27 @@
             height: 100%;
             outline: none;
         }
-        
         .controls {
             padding: 20px;
             background: #f8f9fa;
-            border-top: 1px solid #e9ecef;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 10px;
+            text-align: center;
         }
-        
         .btn {
             background: #667eea;
             color: white;
             border: none;
-            padding: 10px 20px;
+            padding: 12px 25px;
             border-radius: 10px;
             cursor: pointer;
-            font-size: 0.9rem;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            transition: all 0.3s ease;
+            font-size: 1rem;
+            margin: 5px;
+            display: inline-block;
         }
-        
-        .btn:hover {
-            background: #5a67d8;
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-        }
-        
-        .btn-secondary {
-            background: #6c757d;
-        }
-        
-        .btn-secondary:hover {
-            background: #5a6268;
-            box-shadow: 0 5px 15px rgba(108, 117, 125, 0.4);
-        }
-        
         .info {
-            color: #666;
-            font-size: 0.85rem;
-            text-align: center;
             padding: 15px;
-            background: #f8f9fa;
-            border-top: 1px solid #e9ecef;
-        }
-        
-        @media (max-width: 768px) {
-            .container {
-                border-radius: 15px;
-            }
-            
-            .header h1 {
-                font-size: 1.2rem;
-            }
-            
-            .controls {
-                flex-direction: column;
-            }
-            
-            .btn {
-                width: 100%;
-                justify-content: center;
-            }
+            text-align: center;
+            color: #666;
+            font-size: 0.9rem;
         }
     </style>
 </head>
@@ -140,35 +68,25 @@
     <div class="container">
         <div class="header">
             <h1>{{ video_name }}</h1>
-            <div class="stats">
-                <span>👁️ {{ views }} views</span>
-                <span>🎬 Streaming Video</span>
-            </div>
+            <p>👁️ {{ views }} views | 📅 {{ created }} | 👤 {{ username }}</p>
         </div>
         
         <div class="video-container">
             <video controls autoplay playsinline>
                 <source src="/video/{{ video_id }}" type="video/mp4">
-                Your browser does not support the video tag.
+                Your browser does not support video playback.
             </video>
         </div>
         
         <div class="controls">
-            <button onclick="copyLink()" class="btn">
-                <span>📋</span> Copy Link
-            </button>
-            
-            <a href="/" class="btn btn-secondary">
-                <span>⬅️</span> Back to Home
-            </a>
-            
-            <button onclick="toggleFullscreen()" class="btn">
-                <span>🔲</span> Fullscreen
-            </button>
+            <button onclick="copyLink()" class="btn">📋 Copy Link</button>
+            <button onclick="location.href='/'" class="btn">🏠 Home</button>
+            <button onclick="shareVideo()" class="btn">📤 Share</button>
         </div>
         
         <div class="info">
-            <p>Streaming via Telegram Video Stream Bot • This link will expire in 7 days</p>
+            <p>Streaming via Telegram Video Stream Bot • Video ID: {{ video_id }}</p>
+            <p>📦 Size: {{ "%.1f"|format(video_size) }} MB • Auto-deletes in 24 hours</p>
         </div>
     </div>
 
@@ -176,36 +94,31 @@
         function copyLink() {
             const link = window.location.href;
             navigator.clipboard.writeText(link).then(() => {
-                alert('Link copied to clipboard!');
+                alert('✅ Link copied to clipboard!');
             });
         }
         
-        function toggleFullscreen() {
-            const video = document.querySelector('video');
-            if (!document.fullscreenElement) {
-                if (video.requestFullscreen) {
-                    video.requestFullscreen();
-                } else if (video.webkitRequestFullscreen) {
-                    video.webkitRequestFullscreen();
-                } else if (video.msRequestFullscreen) {
-                    video.msRequestFullscreen();
-                }
+        function shareVideo() {
+            const link = window.location.href;
+            if (navigator.share) {
+                navigator.share({
+                    title: 'Watch: {{ video_name }}',
+                    text: 'Check out this video!',
+                    url: link,
+                });
             } else {
-                if (document.exitFullscreen) {
-                    document.exitFullscreen();
-                } else if (document.webkitExitFullscreen) {
-                    document.webkitExitFullscreen();
-                } else if (document.msExitFullscreen) {
-                    document.msExitFullscreen();
-                }
+                copyLink();
             }
         }
         
-        // Auto-play video when page loads
-        document.addEventListener('DOMContentLoaded', () => {
+        // Auto-play video
+        document.addEventListener('DOMContentLoaded', function() {
             const video = document.querySelector('video');
-            video.play().catch(e => console.log('Auto-play prevented:', e));
+            video.play().catch(e => {
+                console.log('Auto-play prevented, user interaction required');
+            });
         });
     </script>
 </body>
-  </html>
+</html>
+EOF  </html>
