@@ -1,3 +1,4 @@
+cat > templates/error.html << 'EOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -49,10 +50,11 @@
         <h1>❌ Error</h1>
         <p>{{ message }}</p>
         <a href="/" class="btn">🏠 Go Home</a>
-        <a href="https://t.me/your_bot_username" class="btn" target="_blank">🤖 Open Bot</a>
+        <a href="https://t.me/web_stream_1_bot" class="btn" target="_blank">🤖 Open Bot</a>
         <p style="margin-top: 20px; font-size: 0.9rem; color: #999;">
             Server: {{ server_url }}
         </p>
     </div>
 </body>
 </html>
+EOF
